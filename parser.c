@@ -27,7 +27,8 @@ typedef struct charClass{
 bool cc_match( charClass *class, char c ){
 
   if( class == NULL ){ return true; } /* Epsilon transition */
-
+  if( c == '\0' ){ return false; } /* It makes most sense to make charClass be the thing
+                                      which understands what a C string is*/
   int a = 0, b = 0;
   bool ret = 0;
 
@@ -119,8 +120,6 @@ int relationFollow( relation *arc, char *rh ){
 
 int sm_match( matcher *sm, char *rh ){
 
-  if( rh[0] == '\0' ){ return sm->accept + -1; }
-
   int max = -1;
   int temp;
   int i;
@@ -151,16 +150,16 @@ char *parseString( matcher *sm, char *string ){
 
   while( !found ){
 
-    pos = match( sm, &string[i]);
-    found = pos > 0;
+    pos = sm_match( sm, &string[i]);
+    found = pos > -1;
     i += !found;
   }
 
   if( found ){
 
-    ret = wo_malloc( pos );
-    strncpy( ret, &string[i], pos - 1 );
-    ret[pos - 1] = '\0';
+    ret = wo_malloc( pos + 1 );
+    strncpy( ret, &string[i], pos );
+    ret[pos] = '\0';
   }
   return ret;
 }
