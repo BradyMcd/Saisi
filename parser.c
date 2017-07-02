@@ -9,7 +9,6 @@
 #include "memory.h"
 
 enum cClassTag{
-  CC_EPS,
   CC_SINGLE,
   CC_RANGE,
   CC_SET,
@@ -17,28 +16,22 @@ enum cClassTag{
 
 typedef struct charClass{
   enum cClassTag tag;
-
   union{
     char c;
     char r[2];
     char *buff;
   } data;
-
-  bool opt;
 }charClass;
 
 
 bool cc_match( charClass *class, char c ){
-  assert( class );
+
+  if( class == NULL ){ return true; } /* Epsilon transition */
 
   int a = 0, b = 0;
   bool ret = 0;
 
   switch( class->tag ){
-  case CC_EPS:
-    assert( class->opt == true );
-    return true;
-    break;
   case CC_SINGLE:
     return class->data.c == c;
     break;
@@ -98,40 +91,51 @@ charClass *cc_single( char c ){
   return class;
 }
 
+typedef struct matcher matcher;
+typedef struct relation{
+  charClass class;
+  matcher *to;
+  bool opt;
+}
+
 typedef struct matcher{
   int relations;
-  struct matcher **relation;
-  charClass **class;
+  relation **arc;
 
   bool accept;
 }matcher;
 
+int relationFollow( relation *arc, char *rh ){
 
-// NOTE: This technically has an error, it returns a number off by 1
-int match( matcher *sm, char *rh ){
+  bool matched = cc_match( arc->class, rh[0] );
+  bool advance = arc->class && matched;
 
-  assert( sm );
-  assert( rh );
+  if( arc->opt || matched ){
+    return advance + sm_match( arc->to, &rh[advance] );
+  }else{
+    return -1;
+  }
+}
 
+int sm_match( matcher *sm, char *rh ){
+
+  if( rh[0] == '\0' ){ return sm->accept + -1; }
+
+  int max = -1;
+  int temp;
   int i;
-  int ret = sm->accept;
-  int temp = 0;
-  bool accepted = false;
-
-  if( rh[0] == '\0' ){return sm->accept;}
 
   for( i = 0; i < sm->relations; ++i ){
-    accepted = cc_match( sm->class[i], *rh );
+    temp = relationFollow( sm->arc[i], rh );
 
-    if( accepted || sm->class[i]->opt ){
-      temp = match( sm->relation[i], &rh[accepted] );
-      if( temp > 0 ){
-        ret = ( ret > temp ) ? ret : temp + accepted;
-      }
-    }
+    max = ( temp > max )? temp: max;
   }
 
-  return ret;
+  if( max == -1 ){
+    return max + sm->accept;
+  }else{
+    return max;
+  }
 }
 
 //Returns the first match found
@@ -161,52 +165,7 @@ char *parseString( matcher *sm, char *string ){
   return ret;
 }
 
-matcher *buildNumberMatcher(){
-
-  matcher *states[3];
-  charClass *classes[2];
-
-  states[0] = fw_malloc( sizeof( matcher ) );
-  states[1] = fw_malloc( sizeof( matcher ) );
-  states[2] = fw_malloc( sizeof( matcher ) );
-
-  classes[0] = cc_single( '-' );
-  classes[0]->opt = true;
-
-  classes[1] = cc_range( '0', '9' );
-
-  states[0]->relations = 1;
-  states[0]->relation = wo_malloc( sizeof(matcher*) );
-  states[0]->class = wo_malloc( sizeof(charClass*) );
-  states[0]->class[0] = classes[0];
-  states[0]->accept = false;
-
-  states[1]->relations = 1;
-  states[1]->relation = wo_malloc( sizeof(matcher*) );
-  states[1]->class = wo_malloc( sizeof(charClass*) );
-  states[1]->class[0] = classes[1];
-  states[1]->accept = false;
-
-  states[2]->relations = 1;
-  states[2]->relation = wo_malloc( sizeof(matcher*) );
-  states[2]->class = wo_malloc( sizeof(charClass*) );
-  states[2]->class[0] = classes[1];
-  states[2]->accept = true;
-
-  states[0]->relation[0] = states[1];
-  states[1]->relation[0] = states[2];
-  states[2]->relation[0] = states[2];
-
-  return states[0];
-}
-
-
 int main(){
-
-  matcher *state_machine = buildNumberMatcher();
-  char test[18] = "Hell1992o World!";
-
-  printf( "%s contains the number %s\n", test, parseString( state_machine, test ) );
 
   return 0;
 }
