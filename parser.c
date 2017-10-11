@@ -7,18 +7,28 @@
 #include <stdbool.h>
 #include <malloc.h>
 
-#define TRY_ALLOC( RV, SIZE ) \
-  RV = malloc( SIZE );        \
-  if( RV == NULL ){ /* ENOMEM */ }
+#include "tylist.h"
 
-#define TRY_REALLOC( CURR, SIZE )               \
-  void *_TEMP = realloc( CURR, SIZE );          \
-  if( _TEMP == NULL ){ /* ENOMEM */ }           \
+/* TODO: Convert to using the tylist interface */
+
+#define TRY_ALLOC( RV, SIZE )                   \
+  RV = malloc( SIZE );                          \
+  if( RV == NULL ){ goto _CATCH;/* ENOMEM */ }
+
+#define TRY_ALLOC_FN( RV, FN )                  \
+  RV = FN();                                    \
+  if( RV == NULL ){ goto _CATCH;/* ENOMEM */ }
+
+
+#define TRY_REALLOC( CURR, SIZE )                 \
+  void *_TEMP = realloc( CURR, SIZE );            \
+  if( _TEMP == NULL ){ goto _CATCH;/* ENOMEM */ } \
   else{ CURR = _TEMP; }
 
 #define CATCH _CATCH:
 
 enum cClassTag{
+  CC_EPS,
   CC_SINGLE,
   CC_RANGE,
   CC_SET,
@@ -33,10 +43,9 @@ struct charClass{
   } data;
 };
 
-
 bool cc_match( struct charClass *class, char c ){
 
-  if( class == NULL ){ return true; } /* Epsilon transition */
+  if( class->tag == CC_EPS ){ return true; }
   if( c == '\0' ){ return false; } /* It makes most sense to make struct charClass be
                                       the thing which understands what a C string is*/
   int a = 0, b = 0;
@@ -76,6 +85,9 @@ struct charClass *cc_range( char a, char b ){
   class->data.r[1] = ( a < b ) ? b : a;
 
   return class;
+
+  CATCH
+    return NULL;
 }
 
 struct charClass *cc_set( char *c ){
@@ -84,11 +96,15 @@ struct charClass *cc_set( char *c ){
   TRY_ALLOC( class, sizeof( struct charClass ) );
 
   class->tag = CC_SET;
-  class->data.buff = malloc( strlen( c ) + 1 );
-  if( class->data.buff == NULL ){ free( class ); return NULL; }
+  TRY_ALLOC( class->data.buff, strlen( c ) + 1 );
   strncpy( class->data.buff, c, strlen( c ) + 1 );
 
   return class;
+
+  CATCH{
+    if( class != NULL ){ free( class ); }
+    return NULL;
+  }
 }
 
 struct charClass *cc_single( char c ){
@@ -100,61 +116,94 @@ struct charClass *cc_single( char c ){
   class->data.c = c;
 
   return class;
+
+  CATCH
+    return NULL;
+}
+
+bool cc_iseps( struct charClass *class ){
+  return class->tag == CC_EPS;
+}
+
+void cc_cleanup( struct charClass *class ){
+
+  switch( class->tag ){
+  case CC_SET:
+    free( class->data.buff );
+  case CC_SINGLE:
+  case CC_RANGE:
+    free( class );
+  }
 }
 
 typedef size_t state_n;
 
-struct matcher;
-struct relation{
+typedef struct matcher matcher;
+typedef struct relation{
   struct charClass *class;
   union{
-    struct matcher *to;
+    matcher *to;
     state_n n;
   } state;
   bool opt;
-};
+} relation;
 
-struct matcher{
-  int relations;
-  struct relation **arc;
+void relation_cleanup( relation *ptr ){
+  /* TODO: IMPLEMENT */
+  /* NOTE: I don't think there is a halt and catch fire state which needs concordant free
+   * I should be safe enough to just assume the state union is in state_n mode but I'm not sure */
+}
+
+TY_LIST_IFACE( relation, &relation_cleanup )
+ITER_IFACE( relation );
+
+typedef struct matcher{
+
+  relation_list *arc;
 
   bool accept;
-};
+} matcher;
 
-struct matcher *newState( ){
-  struct matcher *ret;
-  TRY_ALLOC( ret, sizeof( struct matcher ) );
+matcher *newState( ){
+  matcher *ret;
+  TRY_ALLOC( ret, sizeof( matcher ) );
 
-  ret->relations = 0;
-  ret->arc = NULL;
+  ret->arc = new_relation_list_sized( 4 );
   ret->accept = false;
 
   return ret;
+
+  CATCH{
+    if( ret != NULL ){ free(ret); }
+    return NULL;
+  }
 }
 
-void relationAdd( struct matcher *s, struct charClass *c, bool opt, state_n to ){
+bool relationAdd( matcher *s, struct charClass *c, bool opt, state_n to ){
 
   assert( s != NULL );
   assert( c != NULL );
 
-  TRY_REALLOC( s->arc, sizeof( struct relation* ) * ( s->relations + 1 ) );
+  relation new_arc;
 
-  struct relation *new_arc;
-  TRY_ALLOC( new_arc, sizeof( struct relation ) );
+  TRY_ALLOC( new_arc, sizeof( relation ) );
 
   new_arc->class = c;
   new_arc->state.n = to;
 
   new_arc->opt = opt;
 
-  s->relation[s->relations] = new_arc;
-  s->relations += 1
+  return relation_add( s->arc, new_arc ); //Either returns TY_ERR_ENOMEM or TY_ERR_NONE
+  /* Either returns TY_ERR_ENOMEM ( 0, false ) or TY_ERR_NONE ( 1, true ) */
+  CATCH{
+    return false;
+  }
 }
 
-int relationFollow( struct relation *arc, char *rh ){
+int relationFollow( relation *arc, char *rh ){
 
   bool matched = cc_match( arc->class, rh[0] );
-  bool advance = arc->class && matched;
+  bool advance = !cc_iseps( arc->class ) && matched;
 
   if( arc->opt || matched ){
     return advance + sm_match( arc->state.to, &rh[advance] );
@@ -163,17 +212,20 @@ int relationFollow( struct relation *arc, char *rh ){
   }
 }
 
-int sm_match( struct matcher *sm, char *rh ){
+int sm_match( matcher *sm, char *rh ){
 
   int max = -1;
   int temp;
   int i;
 
-  for( i = 0; i < sm->relations; ++i ){
-    temp = relationFollow( sm->arc[i], rh );
-
-    max = ( temp > max )? temp: max;
+  struct list_iter *iter = start_iter( sm->arc );
+  relation *curr = iter_peek_relation( iter );
+  while( curr != NULL ){
+    temp = relationFollow( curr );
+    max = ( temp>max )? temp: max;
+    curr = iter_next_relation( iter );
   }
+  end_iter( iter );
 
   if( max == -1 ){
     return max + sm->accept;
@@ -183,7 +235,7 @@ int sm_match( struct matcher *sm, char *rh ){
 }
 
 //Returns the first match found
-char *parseString( struct matcher *sm, char *string ){
+char *parseString( matcher *sm, char *string ){
 
   assert( string );
   assert( sm );
@@ -202,90 +254,143 @@ char *parseString( struct matcher *sm, char *string ){
 
   if( found ){
 
-    ret = malloc( pos + 1 );
+    TRY_ALLOC( ret, pos + 1 );
     strncpy( ret, &string[i], pos );
     ret[pos] = '\0';
   }
   return ret;
+  CATCH{
+    return NULL; //? What else can I do here?
+  }
 }
+
+/* Major disadvantages are coming to light here. NEED typedef'd types for the list interface
+ * clutters the namespace far further per interface generated */
+
+TY_LIST_IFACE( matcher, &dropnothing )
+ITER_IFACE( group )
+
+typedef struct group group;
+
+TY_LIST_IFACE( group, &dropnothing )
+ITER_IFACE( group )
 
 typedef size_t state_n;
 
-struct group{
+typedef struct group{
 
-  size_t states;
-  struct matcher **state;
+  matcher_list *states;
+  group_list *sub;
 
-  size_t subs;
-  struct group **sub;
+  size_t s; /* First location in regex string */
+  size_t e; /* Last  location in regex string */
 
   state_n considered;
   state_n next;
-};
+} group;
 
 struct group *newGroup( ){
 
   struct group *ret;
   TRY_ALLOC( ret, sizeof( struct group ) );
 
-  TRY_ALLOC( ret->state, sizeof( struct matcher* ) * 2 );
+  ret->states = new_matcher_list_sized( 4 );
+  ret->subs = NULL;
 
-  ret->state[0] = newState( );
-  ret->state[1] = newState( );
-  ret->states = 2;
-
-  ret->subs = 0;
-  ret->sub = NULL;
+  matcher_list_add( ret->states, newState( ) );
+  matcher_list_add( ret->states, newState( ) );
 
   ret->considered = 0;
   ret->next = 2;
 
   return ret;
+
+  CATCH{
+    return NULL;
+  }
+}
+
+/* Halt and Catch Fire */
+void hcfGroup( group *grp ){
+
+  if( grp == NULL ){
+    return;
+  }
+  tylist_cleanup( grp->states );
+  if( grp->subs != NULL ){
+    tylist_cleanup( grp->subs );
+  }
+  free( grp );
 }
 
 struct group *outerGroup( struct group *g ){
   assert( g != NULL );
-  g->state[1]->accept = true;
+  matcher_list_get( g->states, 1 )->accept = true;
   return g;
 }
 
-struct group *addSub( struct group *p ){
+group *addSub( group *p ){
 
-  struct group** ret = realloc( p->sub, ( p->subs + 1 ) * sizeof( struct group* ) );
-  if( ret == NULL ){ /* ENOMEM */ }
-  ret[p->subs] = newGroup();
+  group *ret;
 
-  p->subs += 1;
+  if( p->subs == NULL ){
+    TRY_ALLOC_FN( p->subs, new_group_list_sized( 2 ) );
+  }
 
-  return ret->[p->subs - 1];
+  TRY_ALLOC_FN( ret, newGroup( ) );
+
+  if( group_add( p->subs, ret ) != TY_ERR_NONE ){
+    hcfGroup( ret );
+    return NULL;
+  }
+
+  return ret;
+
+  CATCH{
+    return NULL;
+  }
 }
 
-struct group *intoGroup( char *curr ){
+struct matcher *g_currState( struct group *g ){
+  assert( g != NULL );
 
-  struct group
+  return matcher_get( g->states, considered );
+}
 
+state_n g_nextState( struct group *g ){
+  assert( g != NULL );
+
+  return g->next;
 }
 
 struct matcher *buildMatcher( char *regex ){
 
   // Recursive?
   struct group g = newGroup( );
+  size_t idx = 0;
 
-  switch( regex[0] ){
-  case '\\': /* Escape character, same as default but +1 index */
-    break;
+  /* I need a char stack? */
+  char slot = 0;
+
+  switch( regex[idx] ){
   case: '|': /* Pop slot and return to start of group */
     break;
   case '+': /* Pop slot and add an EPS transition from self to self */
     break;
   case '?': /* Pop slot and add the optional flag */
     break;
+  case '\\': /* Escape character, same as default but +1 index */
+    ++ idx;
   default: /* Stick whatever is here onto a slot, slot content pops to a charclass */
+    if( slot == 0 ){
+      slot = regex[idx];
+    }else{
+      relationAdd( g_currState( g ), cc_single( slot ), false, g_nextState( g ) );
+      slot = regex[idx];
+    }
     break;
   }
 }
-
-
 
 int main(){
 
